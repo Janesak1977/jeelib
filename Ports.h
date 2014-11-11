@@ -359,6 +359,19 @@ public:
 
     /// This must be called from your watchdog interrupt code.
     static void watchdogEvent();
+
+    /// enter idle state
+    static void idle();
+        
+    /// Idle a while waiting for a relevant interrupt
+    static unsigned int idleSomeTime(unsigned int secs);
+    
+    /// Idle forever waiting for a relevant interrupt
+    static unsigned int idleTimer(); 
+    
+    /// Power down forever waiting for a relevant interrupt
+    static unsigned int pwrDownTimer();
+
 };
 
 /// simple task scheduler for times up to 6000 seconds

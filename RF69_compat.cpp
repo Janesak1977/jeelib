@@ -3,6 +3,9 @@
 #include <avr/sleep.h>
 #include <util/crc16.h>
 
+// maximum transmit / receive buffer: 3 header + data + 2 crc bytes
+#define RF_MAX   (RF12_MAXDATA + 5)
+
 volatile uint16_t rf69_crc;
 volatile uint8_t rf69_buf[72];
 
@@ -24,8 +27,16 @@ static long ezNextSend[2];          // when was last retry [0] or data [1] sent
 
 // void rf69_spiInit () {
 // }
-
-uint8_t rf69_initialize (uint8_t id, uint8_t band, uint8_t group, uint16_t off) {
+/*
+#if defined(__AVR_ATmega1284P__) // Moteino MEGA
+    #define IRQ_NUMBER 2
+#else
+    #define IRQ_NUMBER 0
+#endif
+*/
+uint8_t rf69_initialize (uint8_t id, uint8_t band, uint8_t group=0xD4, uint16_t off=1600) {
+// If we get here by calling rf12_initialize then the default values above are not used 
+// defaults are collected from rf12_initialize in the rf12.h file.
     uint8_t freq = 0;
     switch (band) {
         case RF12_433MHZ: freq = 43; break;
@@ -36,11 +47,19 @@ uint8_t rf69_initialize (uint8_t id, uint8_t band, uint8_t group, uint16_t off) 
     RF69::group = group;
     RF69::node = id & RF12_HDR_MASK;
     delay(20); // needed to make RFM69 work properly on power-up
+    
+// I want to move the interrupt code below into RF69_avr.h routine
+// where better decisions can be made about pin_change interrupts or elsewise
+/*
     if (RF69::node != 0)
-        attachInterrupt(0, RF69::interrupt_compat, RISING);
+        attachInterrupt(IRQ_NUMBER, RF69::interrupt_compat, RISING);
     else
-        detachInterrupt(0);
-    RF69::configure_compat();
+        detachInterrupt(IRQ_NUMBER);
+////////////////////////////////////////////////////////////////////////////////
+*/  
+          
+    RF69::configure_compat(); 
+
     return nodeid = id;
 }
 
@@ -54,14 +73,17 @@ uint8_t rf69_configSilent () {
     if (crc || eeprom_read_byte(RF12_EEPROM_ADDR + 2) != RF12_EEPROM_VERSION)
         return 0;
         
-    uint8_t nodeId = 0, group = 0;   
+    uint8_t nodeId = 0, group = 0, RegPaLvl = 0;   
     uint16_t frequency = 0;  
      
     nodeId = eeprom_read_byte(RF12_EEPROM_ADDR + 0);
     group  = eeprom_read_byte(RF12_EEPROM_ADDR + 1);
-    frequency = eeprom_read_word((uint16_t*) (RF12_EEPROM_ADDR + 4));
-    
+    frequency = eeprom_read_byte(RF12_EEPROM_ADDR + 5);// Avoid eeprom_read_word
+    frequency = (frequency << 8) + (eeprom_read_byte(RF12_EEPROM_ADDR + 4));
+                                                            
     rf69_initialize(nodeId, nodeId >> 6, group, frequency);
+    RegPaLvl = eeprom_read_byte(RF12_EEPROM_ADDR + 6);
+    if (RegPaLvl) RF69::control(0x91, RegPaLvl);
     return nodeId & RF12_HDR_MASK;
 }
 

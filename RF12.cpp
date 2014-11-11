@@ -1,22 +1,23 @@
 /// @file
 /// RFM12B driver implementation
 // 2009-02-09 <jc@wippler.nl> http://opensource.org/licenses/mit-license.php
-
 #include "RF12.h"
 #include <avr/io.h>
 #include <util/crc16.h>
 #include <avr/eeprom.h>
 #include <avr/sleep.h>
 #if ARDUINO >= 100
-#include <Arduino.h> // Arduino 1.0
+#include <Arduino.h>  // Arduino 1.0
 #else
 #include <WProgram.h> // Arduino 0022
 #endif
 
-// #define OPTIMIZE_SPI 1  // uncomment this to write to the RFM12B @ 8 Mhz
+#define OPTIMIZE_SPI 1  // uncomment this to write to the RFM12B @ 8 Mhz
 
-// pin change interrupts are currently only supported on ATmega328's
+// TODO pin change interrupts are currently only supported on ATmega328's
 // #define PINCHG_IRQ 1    // uncomment this to use pin-change interrupts
+// 
+#define RF69_COMPAT      1   // define this to use the RF69 driver
 
 // maximum transmit / receive buffer: 3 header + data + 2 crc bytes
 #define RF_MAX   (RF12_MAXDATA + 5)
@@ -58,7 +59,7 @@
 
 #elif defined(__AVR_ATtiny84__) || defined(__AVR_ATtiny44__)
 
-#define RFM_IRQ     2
+#define RFM_IRQ     2     // 2 for pin change on JeeNode
 #define SS_DDR      DDRB
 #define SS_PORT     PORTB
 #define SS_BIT      1
@@ -83,7 +84,7 @@
 #else
 
 // ATmega168, ATmega328, etc.
-#define RFM_IRQ     2
+#define RFM_IRQ     2     // 2 for pin change on JeeNode 
 #define SS_DDR      DDRB
 #define SS_PORT     PORTB
 #define SS_BIT      2     // for PORTB: 2 = d.10, 1 = d.9, 0 = d.8
@@ -120,7 +121,6 @@ enum {
     TXRECV,
     TXPRE1, TXPRE2, TXPRE3, TXSYN1, TXSYN2,
 };
-
 static uint8_t cs_pin = SS_BIT;     // chip select pin
 
 static uint8_t nodeid;              // address of this node
@@ -251,35 +251,44 @@ static void rf12_xfer (uint16_t cmd) {
 /// "0x0000" status poll command.
 /// @param cmd RF12 command, topmost bits determines which register is affected.
 uint16_t rf12_control(uint16_t cmd) {
-#ifdef EIMSK
-#if PINCHG_IRQ
-    #if RFM_IRQ < 8
-        bitClear(PCICR, PCIE2);
-    #elif RFM_IRQ < 14
-        bitClear(PCICR, PCIE0);
+#ifdef EIMSK    // ATMega
+    #if PINCHG_IRQ    
+        #if RFM_IRQ < 8     // Disable appropriate interrupt
+           bitClear(PCICR, PCIE2);
+        #elif RFM_IRQ < 14
+           bitClear(PCICR, PCIE0);
+        #else
+           bitClear(PCICR, PCIE1);
+        #endif
     #else
-        bitClear(PCICR, PCIE1);
+        bitClear(EIMSK, INT0);
     #endif
-#else
-    bitClear(EIMSK, INT0);
-#endif
-   uint16_t r = rf12_xferSlow(cmd);
-#if PINCHG_IRQ
-    #if RFM_IRQ < 8
-        bitSet(PCICR, PCIE2);
-    #elif RFM_IRQ < 14
-        bitSet(PCICR, PCIE0);
+    uint16_t r = rf12_xferSlow(cmd); // Transfer the SPI command
+    #if PINCHG_IRQ
+        #if RFM_IRQ < 8     // Enable appropriate interrupt
+            bitSet(PCICR, PCIE2);
+        #elif RFM_IRQ < 14
+            bitSet(PCICR, PCIE0);
+        #else
+            bitSet(PCICR, PCIE1);
+        #endif
     #else
-        bitSet(PCICR, PCIE1);
+        bitSet(EIMSK, INT0);
     #endif
-#else
-    bitSet(EIMSK, INT0);
-#endif
-#else
-    // ATtiny
-    bitClear(GIMSK, INT0);
-    uint16_t r = rf12_xferSlow(cmd);
-    bitSet(GIMSK, INT0);
+#endif        // ATMega
+
+#ifdef GIMSK                // ATtiny84
+    #if PINCHG_IRQ          // Disable the relevant interrupt
+        bitClear(GIMSK, PCIE1);
+    #else
+        bitClear(GIMSK, INT0);
+    #endif
+    uint16_t r = rf12_xferSlow(cmd); // Transfer the SPI command
+    #if PINCHG_IRQ         // Re-enable the relevant interrupt
+        bitSet(GIMSK, PCIE1);
+    #else
+        bitSet(GIMSK, INT0);
+    #endif
 #endif
     return r;
 }
@@ -320,26 +329,39 @@ static void rf12_interrupt () {
         rf12_xfer(RF_TXREG_WRITE + out);
     }
 }
-
-#if PINCHG_IRQ
-    #if RFM_IRQ < 8
-        ISR(PCINT2_vect) {
-            while (!bitRead(PIND, RFM_IRQ))
-                rf12_interrupt();
-        }
-    #elif RFM_IRQ < 14
-        ISR(PCINT0_vect) { 
-            while (!bitRead(PINB, RFM_IRQ - 8))
-                rf12_interrupt();
-        }
-    #else
-        ISR(PCINT1_vect) {
-            while (!bitRead(PINC, RFM_IRQ - 14))
-                rf12_interrupt();
-        }
+#ifndef RF69_COMPAT
+#ifdef EIMSK  // ATMega
+    #if PINCHG_IRQ
+        #if RFM_IRQ < 8       // Create appropriate pin change interrupt handler
+            ISR(PCINT2_vect) {
+                while (!bitRead(PIND, RFM_IRQ))
+                    rf12_interrupt();
+            }
+        #elif RFM_IRQ < 14
+            ISR(PCINT0_vect) { 
+                while (!bitRead(PINB, RFM_IRQ - 8))
+                    rf12_interrupt();
+            }
+        #else
+            ISR(PCINT1_vect) {
+                while (!bitRead(PINC, RFM_IRQ - 14))
+                    rf12_interrupt();
+            }
+        #endif
     #endif
 #endif
+#endif
 
+#ifndef RF69_COMPAT
+#ifdef GIMSK      // ATTiny
+    #if PINCHG_IRQ            
+        ISR(PCINT1_vect) {    // Create appropriate pin change interrupt handler
+
+                rf12_interrupt();
+            }
+    #endif
+#endif
+#endif
 static void rf12_recvStart () {
     if (rf12_fixed_pkt_len) {
         rf12_len = rf12_fixed_pkt_len;
@@ -585,39 +607,60 @@ uint8_t rf12_initialize (uint8_t id, uint8_t band, uint8_t g, uint16_t f) {
     rf12_xfer(0xC049); // 1.66MHz,3.1V 
 
     rxstate = TXIDLE;
-#if PINCHG_IRQ
-    #if RFM_IRQ < 8
-        if ((nodeid & NODE_ID) != 0) {
-            bitClear(DDRD, RFM_IRQ);      // input
-            bitSet(PORTD, RFM_IRQ);       // pull-up
-            bitSet(PCMSK2, RFM_IRQ);      // pin-change
-            bitSet(PCICR, PCIE2);         // enable
-        } else
-            bitClear(PCMSK2, RFM_IRQ);
-    #elif RFM_IRQ < 14
-        if ((nodeid & NODE_ID) != 0) {
-            bitClear(DDRB, RFM_IRQ - 8);  // input
-            bitSet(PORTB, RFM_IRQ - 8);   // pull-up
-            bitSet(PCMSK0, RFM_IRQ - 8);  // pin-change
-            bitSet(PCICR, PCIE0);         // enable
-        } else
-            bitClear(PCMSK0, RFM_IRQ - 8);
+#ifndef RF69_COMPAT
+#ifdef EIMSK    // ATMega
+    #if PINCHG_IRQ
+        #if RFM_IRQ < 8
+            if ((nodeid & NODE_ID) != 0) {
+                bitClear(DDRD, RFM_IRQ);      // input
+                bitSet(PORTD, RFM_IRQ);       // pull-up
+                bitSet(PCMSK2, RFM_IRQ);      // pin-change
+                bitSet(PCICR, PCIE2);         // enable
+            } else
+                bitClear(PCMSK2, RFM_IRQ);
+        #elif RFM_IRQ < 14
+            if ((nodeid & NODE_ID) != 0) {
+                bitClear(DDRB, RFM_IRQ - 8);  // input
+                bitSet(PORTB, RFM_IRQ - 8);   // pull-up
+                bitSet(PCMSK0, RFM_IRQ - 8);  // pin-change
+                bitSet(PCICR, PCIE0);         // enable
+            } else
+                bitClear(PCMSK0, RFM_IRQ - 8);
+        #else
+            if ((nodeid & NODE_ID) != 0) {
+                bitClear(DDRC, RFM_IRQ - 14); // input
+                bitSet(PORTC, RFM_IRQ - 14);  // pull-up
+                bitSet(PCMSK1, RFM_IRQ - 14); // pin-change
+                bitSet(PCICR, PCIE1);         // enable
+            } else
+                bitClear(PCMSK1, RFM_IRQ - 14);
+        #endif
     #else
-        if ((nodeid & NODE_ID) != 0) {
-            bitClear(DDRC, RFM_IRQ - 14); // input
-            bitSet(PORTC, RFM_IRQ - 14);  // pull-up
-            bitSet(PCMSK1, RFM_IRQ - 14); // pin-change
-            bitSet(PCICR, PCIE1);         // enable
-        } else
-            bitClear(PCMSK1, RFM_IRQ - 14);
+        if ((nodeid & NODE_ID) != 0)
+            attachInterrupt(0, rf12_interrupt, LOW);
+        else
+            detachInterrupt(0);
     #endif
-#else
-    if ((nodeid & NODE_ID) != 0)
-        attachInterrupt(0, rf12_interrupt, LOW);
-    else
-        detachInterrupt(0);
 #endif
-    
+#endif
+
+#ifndef RF69_COMPAT
+#ifdef GIMSK    // ATTiny
+    #if PINCHG_IRQ
+        if ((nodeid & NODE_ID) != 0) {
+            bitClear(DDRB, RFM_IRQ);      // input
+            bitSet(PORTB, RFM_IRQ);       // pull-up
+            bitSet(PCMSK1, RFM_IRQ);      // pin-change
+            bitSet(GIMSK, PCIE1);         // enable
+        }        
+    #else
+        if ((nodeid & NODE_ID) != 0)
+            attachInterrupt(0, rf12_interrupt, LOW);
+        else
+            detachInterrupt(0);
+    #endif
+#endif
+#endif
     return nodeid;
 }
 
@@ -654,7 +697,7 @@ uint8_t rf12_configSilent () {
         byte e = eeprom_read_byte(RF12_EEPROM_ADDR + i);
         crc = _crc16_update(crc, e);
     }
-    if (crc || eeprom_read_byte(RF12_EEPROM_ADDR + 2) != RF12_EEPROM_VERSION)
+    if (crc || !(eeprom_read_byte(RF12_EEPROM_ADDR + 2) == RF12_EEPROM_VERSION))
         return 0;
         
     uint8_t nodeId = 0, group = 0;   
@@ -662,8 +705,9 @@ uint8_t rf12_configSilent () {
      
     nodeId = eeprom_read_byte(RF12_EEPROM_ADDR + 0);
     group  = eeprom_read_byte(RF12_EEPROM_ADDR + 1);
-    frequency = eeprom_read_word((uint16_t*) (RF12_EEPROM_ADDR + 4));
-    
+    frequency = eeprom_read_byte(RF12_EEPROM_ADDR + 5);
+    frequency = (frequency << 8) + (eeprom_read_byte(RF12_EEPROM_ADDR + 4));
+
     rf12_initialize(nodeId, nodeId >> 6, group, frequency);
     return nodeId & RF12_HDR_MASK;
 }
@@ -674,36 +718,45 @@ uint8_t rf12_configSilent () {
 void rf12_configDump () {
     uint8_t nodeId = eeprom_read_byte(RF12_EEPROM_ADDR);
     uint8_t flags = eeprom_read_byte(RF12_EEPROM_ADDR + 3);
-    uint16_t freq = eeprom_read_word((uint16_t*) (RF12_EEPROM_ADDR + 4));
+    frequency = eeprom_read_byte(RF12_EEPROM_ADDR + 5);
+    frequency = (frequency << 8) + (eeprom_read_byte(RF12_EEPROM_ADDR + 4));
     
     // " A i1 g178 @ 868 MHz "
     Serial.print(' ');
     Serial.print((char) ('@' + (nodeId & RF12_HDR_MASK)));
     Serial.print(" i");
-    Serial.print(nodeId & RF12_HDR_MASK);
+    Serial.print((word)nodeId & RF12_HDR_MASK);
     if (flags & 0x04)
         Serial.print('*');
     Serial.print(" g");
-    Serial.print(eeprom_read_byte(RF12_EEPROM_ADDR + 1));
+    Serial.print((word)eeprom_read_byte(RF12_EEPROM_ADDR + 1));
     Serial.print(" @ ");
     uint8_t band = nodeId >> 6;
-    Serial.print(band == RF12_433MHZ ? 433 :
+    Serial.print((word)band == RF12_433MHZ ? 434 :
                  band == RF12_868MHZ ? 868 :
-                 band == RF12_915MHZ ? 915 : 0);
+                 band == RF12_915MHZ ? 912 : 0);
     Serial.print(" MHz");
-    if (flags & 0x04) {
-        Serial.print(" c1");
-    }
-    if (freq != 1600) {
+    if (frequency != 1600) {
         Serial.print(" o");
-        Serial.print(freq);
+        Serial.print(frequency);
     }
     if (flags & 0x08) {
         Serial.print(" q1");
     }
+    if (flags & 0x04) {
+        Serial.print(" c1");
+    }
     if (flags & 0x03) {
         Serial.print(" x");
         Serial.print(flags & 0x03);
+    }
+    // Bad reuse of flags variable
+    flags = eeprom_read_byte(RF12_EEPROM_ADDR + 6);
+    if (flags) {
+        if (flags != 0x9F) {
+            Serial.print(" r");
+            Serial.print(flags, HEX);
+       }
     }
     Serial.println();
 }
