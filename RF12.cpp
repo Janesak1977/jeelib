@@ -284,6 +284,8 @@ uint16_t rf12_control(uint16_t cmd) {
     return r;
 }
 
+/* GCR Replace ISR */
+/*
 static void rf12_interrupt () {
     // a transfer of 2x 16 bits @ 2 MHz over SPI takes 2x 8 us inside this ISR
     // correction: now takes 2 + 8 µs, since sending can be done at 8 MHz
@@ -320,6 +322,7 @@ static void rf12_interrupt () {
         rf12_xfer(RF_TXREG_WRITE + out);
     }
 }
+*/
 
 #if PINCHG_IRQ
     #if RFM_IRQ < 8
@@ -339,6 +342,74 @@ static void rf12_interrupt () {
         }
     #endif
 #endif
+
+/* GCR New ISR */
+static void rf12_interrupt ()
+{
+    // a transfer of 2x 16 bits @ 2 MHz over SPI takes 2x 8 us inside this ISR
+    // correction: now takes 2 + 8 µs, since sending can be done at 8 MHz
+    rf12_xfer(0x0000); 
+
+    if (rxstate == TXRECV)
+	{
+        uint8_t in = rf12_xferSlow(RF_RX_FIFO_READ);
+        
+/* GCR */
+        // Check what type of frame it looks like with the first received byte
+        if (rxfill == 0)
+		{
+        	if ((in & 0xf0) == 0x90)
+        		ITPlusFrame = true;
+        	else
+        		ITPlusFrame = false;
+        }
+/* GCR */
+
+        if (rxfill == 0 && group != 0 && !ITPlusFrame)  /* GCR : added  && !ITPlusFrame */
+            rf12_buf[rxfill++] = group;
+            
+        rf12_buf[rxfill++] = in;
+        
+/* GCR */
+        if (ITPlusFrame)
+		{
+        	if (rxfill == 5)	// IT+ Frames always has 5 bytes
+        		rf12_xfer(RF_IDLE_MODE);
+        		// CRC will be computed later
+/* GCR */
+		}
+		else
+		{
+        	rf12_crc = _crc16_update(rf12_crc, in);
+
+        	if (rxfill >= rf12_len + 5 || rxfill >= RF_MAX)
+            	rf12_xfer(RF_IDLE_MODE);
+        }
+    }
+	else
+	{
+        uint8_t out;
+
+        if (rxstate < 0)
+		{
+            uint8_t pos = 3 + rf12_len + rxstate++;
+            out = rf12_buf[pos];
+            rf12_crc = _crc16_update(rf12_crc, out);
+        }
+		else
+            switch (rxstate++)
+			{
+                case TXSYN1: out = 0x2D; break;
+                case TXSYN2: out = group; rxstate = - (2 + rf12_len); break;
+                case TXCRC1: out = rf12_crc; break;
+                case TXCRC2: out = rf12_crc >> 8; break;
+                case TXDONE: rf12_xfer(RF_IDLE_MODE); // fall through
+                default:     out = 0xAA;
+            }
+            
+        rf12_xfer(RF_TXREG_WRITE + out);
+    }
+}
 
 static void rf12_recvStart () {
     if (rf12_fixed_pkt_len) {
@@ -387,18 +458,31 @@ static void rf12_recvStart () {
 ///      }
 /// @see http://jeelabs.org/2010/12/11/rf12-acknowledgements/
 uint8_t rf12_recvDone () {
-    if (rxstate == TXRECV && (rxfill >= rf12_len + 5 || rxfill >= RF_MAX)) {
-        rxstate = TXIDLE;
-        if (rf12_len > RF12_MAXDATA)
-            rf12_crc = 1; // force bad crc if packet length is invalid
-        if (!(rf12_hdr & RF12_HDR_DST) || (nodeid & NODE_ID) == 31 ||
-                (rf12_hdr & RF12_HDR_MASK) == (nodeid & NODE_ID)) {
-            if (rf12_crc == 0 && crypter != 0)
-                crypter(0);
-            else
-                rf12_seq = -1;
-            return 1; // it's a broadcast packet or it's addressed to this node
+/* GCR */
+	// Two different receive conditions depending on frame type RFM12/Jeenode or RFM01/IT+
+    if (ITPlusFrame)
+	{
+    	if (rxstate == TXRECV && rxfill == 5) {	// IT+ Frames always has 5 bytes
+            rxstate = TXIDLE;
+            return 1;	// Got full IT+ frame
         }
+/* GCR */
+	}
+	else
+	{   // RFM12/Jeenode normal processing
+	    if (rxstate == TXRECV && (rxfill >= rf12_len + 5 || rxfill >= RF_MAX)) {
+  	      	rxstate = TXIDLE;
+   		     if (rf12_len > RF12_MAXDATA)
+   	         	  rf12_crc = 1; // force bad crc if packet length is invalid
+  	      	 if (!(rf12_hdr & RF12_HDR_DST) || (nodeid & NODE_ID) == 31 ||
+                	 (rf12_hdr & RF12_HDR_MASK) == (nodeid & NODE_ID)) {
+            	if (rf12_crc == 0 && crypter != 0)
+                	crypter(0);
+            	else
+                	rf12_seq = -1;
+            	return 1; // it's a broadcast packet or it's addressed to this node
+        	 }
+    	}
     }
     if (rxstate == TXIDLE)
         rf12_recvStart();
@@ -620,6 +704,14 @@ uint8_t rf12_initialize (uint8_t id, uint8_t band, uint8_t g, uint16_t f) {
     
     return nodeid;
 }
+
+/* GCR : RF12 overide settings for IT+ */
+void rf12_initialize_overide_ITP () {
+    rf12_xfer(0xA67c); // FREQUENCY 868.300MHz
+    rf12_xfer(0xC613); // DATA RATE 17.241 kbps
+    rf12_xfer(0x94a0); // RECEIVER CONTROL VDI Medium 134khz LNA max DRRSI 103 dbm
+}
+/* GCR */
 
 /// @details
 /// This can be used to send out slow bit-by-bit On Off Keying signals to other
