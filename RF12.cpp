@@ -147,6 +147,10 @@ static uint32_t seqNum;             // encrypted send sequence number
 static uint32_t cryptKey[4];        // encryption key to use
 void (*crypter)(uint8_t);           // does en-/decryption (null if disabled)
 
+/* GCR */
+boolean ITPlusFrame;
+/* GCR */
+
 // function to set chip select pin from within sketch
 void rf12_set_cs (uint8_t pin) {
 #if defined(__AVR_ATmega32U4__) //Arduino Leonardo 
